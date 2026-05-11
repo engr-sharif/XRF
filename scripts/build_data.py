@@ -287,6 +287,22 @@ def load_tracker():
 
 SAMPLE_ID_RE = re.compile(r"^SBM-([A-Z]+)-G(\d+)-B(\d+)")
 
+# Some sheets (notably Depth XRF Detail) use variant boulder IDs with an
+# inserted -HB-/-FB- segment and/or an unpadded grid number. Boulder Sample Log
+# canonicalizes on SBM-{AREA}-G{NN}-B{n}, so normalize variants to that form
+# before joining.
+SAMPLE_ID_NORMALIZE_RE = re.compile(r"^(SBM-[A-Z]+)-G(\d+)(?:-[HF]B)?-B(\d+)$")
+
+
+def normalize_sample_id(sid):
+    if not sid:
+        return sid
+    s = str(sid).strip()
+    m = SAMPLE_ID_NORMALIZE_RE.match(s)
+    if m:
+        return f"{m.group(1)}-G{int(m.group(2)):02d}-B{m.group(3)}"
+    return s
+
 
 def parse_sample_id(sid):
     if not sid:
@@ -343,6 +359,13 @@ def join_readings(tracker, gun_readings):
         key = (gun, int(rdg))
         csv_row = gun_readings.get(key)
         rec = dict(r)
+        # Normalize Sample ID so depth-XRF variant naming (G6-HB-B1, G06-FB-B2,
+        # etc.) joins to the canonical Boulder Sample Log ID (G06-B1, G06-B2).
+        original_sid = rec.get("Sample ID")
+        normalized = normalize_sample_id(original_sid)
+        if normalized != original_sid:
+            rec["Sample ID (raw)"] = original_sid
+            rec["Sample ID"] = normalized
         rec["_key"] = f"{gun}:{rdg}"
         rec["_csv"] = csv_row
         depth.append(rec)
@@ -364,7 +387,9 @@ def join_readings(tracker, gun_readings):
         csv_row = gun_readings.get(key)
         rec = dict(r)
         rec["Sample ID"] = sid
-        rec["Parent Boulder"] = parent
+        rec["Parent Boulder"] = normalize_sample_id(parent) if parent else parent
+        if parent and rec["Parent Boulder"] != parent:
+            rec["Parent Boulder (raw)"] = parent
         rec["Date"] = d
         rec["_key"] = f"{gun}:{rdg}"
         rec["_csv"] = csv_row
