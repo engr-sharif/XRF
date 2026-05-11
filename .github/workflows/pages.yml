@@ -1,12 +1,16 @@
-name: Deploy site to GitHub Pages
+name: Rebuild data.json and deploy to GitHub Pages
 
 on:
   push:
     branches: [main]
+    # Don't loop when the workflow's own auto-commit lands.
+    paths-ignore:
+      - 'site/data/data.json'
+      - 'site/data/*.csv'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -15,10 +19,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need a real token to push back to main.
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-python@v5
         with:
@@ -28,6 +35,18 @@ jobs:
 
       - name: Build site data
         run: python scripts/build_data.py
+
+      - name: Commit regenerated data.json + CSVs (if changed)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add site/data/data.json site/data/SBM-XRF-*.csv
+          if git diff --staged --quiet; then
+            echo "site/data is unchanged"
+          else
+            git commit -m "Auto-rebuild site/data from XLSX + CSVs [skip ci]"
+            git push origin HEAD:main
+          fi
 
       - uses: actions/configure-pages@v5
 
