@@ -116,14 +116,38 @@ function renderElementBar() {
     }, sym);
     bar.appendChild(chip);
   }
-  const toggle = el('span', {
+
+  bar.appendChild(el('span', { class: 'elem-divider' }));
+
+  bar.appendChild(el('span', {
+    class: 'elem-chip elem-action',
+    title: 'Select every element in the data',
+    onclick: () => setElements(all),
+  }, 'All'));
+  bar.appendChild(el('span', {
+    class: 'elem-chip elem-action',
+    title: 'Deselect every element',
+    onclick: () => setElements([]),
+  }, 'None'));
+  bar.appendChild(el('span', {
+    class: 'elem-chip elem-action',
+    title: 'Reset to the extended-metals default (As, Pb, Hg, Sb, Cu, Zn, Fe, Mn)',
+    onclick: () => setElements(defaults),
+  }, 'Defaults'));
+
+  bar.appendChild(el('span', {
     class: 'elem-chip toggle-all',
     onclick: () => {
       STATE.allElementsExpanded = !STATE.allElementsExpanded;
       renderElementBar();
     },
-  }, STATE.allElementsExpanded ? '− show defaults' : '+ all elements');
-  bar.appendChild(toggle);
+  }, STATE.allElementsExpanded ? '− show defaults' : '+ all elements'));
+}
+
+function setElements(syms) {
+  STATE.selectedElements = new Set(syms);
+  renderElementBar();
+  route();
 }
 
 function toggleElement(sym) {
@@ -197,12 +221,16 @@ function renderHome(v) {
   for (const area of STATE.data.areas) {
     const code = area.code;
     const bouldersInArea = STATE.data.boulders.filter(b => b['Area Code'] === code);
-    const doneStr = area.done || '';
-    const [done, total] = (doneStr.match(/(\d+)\/(\d+)/) || ['', '0', '15']).slice(1).map(Number);
-    const pct = total ? (done / total) * 100 : 0;
+    const statuses = Object.values(area.gridsStatus || {});
+    const fullCount = statuses.filter(s => s === '✓').length;
+    const halfCount = statuses.filter(s => s === '½').length;
+    const total = 15;
+    const pct = ((fullCount + halfCount * 0.5) / total) * 100;
+    const doneStr = area.done || `${fullCount}/${total}`;
+    const partial = halfCount ? ` · ${halfCount} partial` : '';
     const card = el('a', { class: 'area-card', href: `#/area/${code}` },
       el('div', { class: 'code' }, code),
-      el('div', { class: 'done' }, `${doneStr || '0/15'} grids complete`),
+      el('div', { class: 'done' }, `${doneStr} grids complete${partial}`),
       el('div', { class: 'bar' }, el('div', { class: 'fill', style: `width:${pct}%` })),
       el('div', { class: 'meta' },
         el('span', {}, `${bouldersInArea.length} boulders`),
@@ -1105,56 +1133,149 @@ function setupSearch() {
   });
 }
 
+// Build searchable haystack tokens for a boulder.
+// Includes the raw ID, area, grid (as "g12", "12", "g012"), boulder ("b1", "1"),
+// and all spaced/de-prefixed forms. Used as a single concatenated lowercase string.
+function boulderHaystack(b) {
+  const sid = (b['Sample ID'] || '').toLowerCase();
+  const area = (b['Area Code'] || '').toLowerCase();
+  const grid = b['Grid #'];
+  const num = String(b['Boulder #'] || '').toLowerCase();
+  const numDigits = num.replace(/[^0-9]/g, '');
+  const gridPadded = grid != null ? String(grid).padStart(2, '0') : '';
+  const parts = [
+    sid,
+    sid.replace(/-/g, ' '),
+    sid.replace(/^sbm-/, ''),
+    area,
+    `g${grid}`, `g${gridPadded}`, String(grid ?? ''),
+    num, numDigits,
+    `${area} g${grid} ${num}`,
+    `${area}-g${grid}-${num}`,
+    `${area} ${grid} ${numDigits}`,
+    b['Type (H/F)'] === 'H' ? 'hard h' : b['Type (H/F)'] === 'F' ? 'friable f' : '',
+  ];
+  return parts.join(' ').toLowerCase();
+}
+
+function tokenize(q) {
+  return q.toLowerCase().split(/[\s\-\/,_]+/).filter(Boolean);
+}
+
+function scoreBoulder(b, tokens, haystack) {
+  // Higher = better. Every token must be present.
+  let score = 0;
+  for (const t of tokens) {
+    if (!haystack.includes(t)) return -1;
+    // Bonus for matching specific fields
+    if ((b['Area Code'] || '').toLowerCase() === t) score += 10;
+    if (String(b['Grid #']) === t || `g${b['Grid #']}` === t) score += 6;
+    if (String(b['Boulder #'] || '').toLowerCase() === t) score += 6;
+    if ((b['Sample ID'] || '').toLowerCase().includes(t)) score += 1;
+  }
+  // Shorter IDs sort earlier when scores tie
+  score -= (b['Sample ID'] || '').length * 0.01;
+  return score;
+}
+
 function doSearch(q) {
   const results = $('#searchResults');
   q = q.trim();
   results.innerHTML = '';
-  if (!q || q.length < 2) { results.classList.remove('open'); return; }
-  const ql = q.toLowerCase();
-  const hits = [];
+  if (!q || q.length < 1) { results.classList.remove('open'); return; }
+  const tokens = tokenize(q);
+  if (!tokens.length) { results.classList.remove('open'); return; }
+
+  // Boulder fuzzy match
+  const boulderHits = [];
   for (const b of STATE.data.boulders) {
-    if (b['Sample ID']?.toLowerCase().includes(ql)) {
-      hits.push({ type: 'Boulder', label: b['Sample ID'], sub: `${b['Area Code']} G${b['Grid #']} · ${b['Type (H/F)']}`, href: `#/boulder/${encodeURIComponent(b['Sample ID'])}` });
-      if (hits.length >= 20) break;
+    const hay = boulderHaystack(b);
+    const s = scoreBoulder(b, tokens, hay);
+    if (s >= 0) boulderHits.push({ b, score: s });
+  }
+  boulderHits.sort((a, b) => b.score - a.score);
+
+  // Area fuzzy: any token that is the area code (case-insensitive)
+  const areaHits = [];
+  for (const a of STATE.data.areas) {
+    const al = a.code.toLowerCase();
+    if (tokens.some(t => al.startsWith(t) || t.startsWith(al) || al.includes(t))) {
+      areaHits.push(a);
     }
   }
-  if (hits.length < 20 && /^\d+$/.test(q)) {
-    const rdg = parseInt(q);
+
+  // Reading number: any pure-numeric token can target a reading
+  const rdgHits = [];
+  const numTokens = tokens.filter(t => /^\d+$/.test(t)).map(Number);
+  if (numTokens.length && rdgHits.length < 10) {
+    const wantedRdgs = new Set(numTokens);
     for (const r of STATE.data.surfaceReadings) {
-      if (parseInt(r['XRF Rdg #']) === rdg) {
-        hits.push({ type: `Rdg ${rdg}`, label: r['Sample ID'], sub: `Surface · ${r['XRF S/N']}`, href: `#/boulder/${encodeURIComponent(r['Sample ID'])}` });
-        if (hits.length >= 20) break;
+      if (wantedRdgs.has(parseInt(r['XRF Rdg #']))) {
+        rdgHits.push({ kind: 'Surface', r });
+        if (rdgHits.length >= 10) break;
       }
     }
-    if (hits.length < 20) {
+    if (rdgHits.length < 10) {
       for (const r of STATE.data.depthReadings) {
-        if (parseInt(r['XRF Rdg #']) === rdg) {
-          hits.push({ type: `Rdg ${rdg}`, label: r['Sample ID'], sub: `Depth · ${r['XRF S/N']}`, href: `#/boulder/${encodeURIComponent(r['Sample ID'])}` });
-          if (hits.length >= 20) break;
+        if (wantedRdgs.has(parseInt(r['XRF Rdg #']))) {
+          rdgHits.push({ kind: 'Depth', r });
+          if (rdgHits.length >= 10) break;
+        }
+      }
+    }
+    if (rdgHits.length < 10) {
+      for (const r of STATE.data.powderReadings) {
+        if (wantedRdgs.has(parseInt(r['XRF Rdg #']))) {
+          rdgHits.push({ kind: 'Powder', r });
+          if (rdgHits.length >= 10) break;
         }
       }
     }
   }
-  // Areas
-  for (const a of STATE.data.areas) {
-    if (a.code.toLowerCase().includes(ql)) {
-      hits.push({ type: 'Area', label: a.code, sub: a.done || '', href: `#/area/${a.code}` });
-    }
+
+  const append = (h) => {
+    results.appendChild(el('div', { class: 'search-result', onclick: () => {
+      location.hash = h.href.replace(/^#/, '');
+      $('#globalSearch').value = '';
+      results.classList.remove('open');
+    } },
+      el('span', { class: 'sr-type' }, h.type),
+      h.label,
+      h.sub ? el('div', { class: 'sr-sub' }, h.sub) : null,
+    ));
+  };
+
+  let any = false;
+  for (const a of areaHits) {
+    append({ type: 'Area', label: a.code, sub: a.done || '', href: `#/area/${a.code}` });
+    any = true;
   }
-  if (!hits.length) {
-    results.appendChild(el('div', { class: 'search-result' }, el('span', { class: 'sr-sub' }, 'No matches')));
-  } else {
-    for (const h of hits) {
-      results.appendChild(el('div', { class: 'search-result', onclick: () => {
-        location.hash = h.href.replace(/^#/, '');
-        $('#globalSearch').value = '';
-        results.classList.remove('open');
-      } },
-        el('span', { class: 'sr-type' }, h.type),
-        h.label,
-        h.sub ? el('div', { class: 'sr-sub' }, h.sub) : null,
-      ));
-    }
+  for (const { b } of boulderHits.slice(0, 25)) {
+    append({
+      type: 'Boulder',
+      label: b['Sample ID'],
+      sub: `${b['Area Code']} · G${String(b['Grid #']).padStart(2, '0')} · ${b['Type (H/F)'] === 'H' ? 'Hard' : 'Friable'}`,
+      href: `#/boulder/${encodeURIComponent(b['Sample ID'])}`,
+    });
+    any = true;
+  }
+  if (boulderHits.length > 25) {
+    results.appendChild(el('div', { class: 'search-result', style: 'color:var(--text-dim);font-style:italic;' },
+      `+${boulderHits.length - 25} more boulders match — keep typing to narrow…`));
+  }
+  for (const { kind, r } of rdgHits) {
+    append({
+      type: `Rdg ${r['XRF Rdg #']}`,
+      label: r['Sample ID'] || '(orphan)',
+      sub: `${kind} · ${r['XRF S/N'] || ''}`,
+      href: r['Sample ID'] ? `#/boulder/${encodeURIComponent(r['Sample ID'])}` : '#/reconcile',
+    });
+    any = true;
+  }
+
+  if (!any) {
+    results.appendChild(el('div', { class: 'search-result' },
+      el('span', { class: 'sr-sub' }, `No matches for "${q}"`)));
   }
   results.classList.add('open');
 }

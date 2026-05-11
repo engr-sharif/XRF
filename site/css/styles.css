@@ -90,6 +90,15 @@ a:hover { text-decoration: underline; }
 .elem-chip:hover { color: var(--text); border-color: var(--accent-dim); }
 .elem-chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .elem-chip.toggle-all { background: transparent; color: var(--accent); border-color: var(--accent-dim); }
+.elem-chip.elem-action {
+  background: var(--bg-elev); color: var(--text);
+  border-color: var(--border-strong); font-weight: 600;
+}
+.elem-chip.elem-action:hover { background: var(--accent-dim); color: #fff; border-color: var(--accent); }
+.elem-divider {
+  display: inline-block; width: 1px; height: 18px;
+  background: var(--border-strong); margin: 0 4px;
+}
 
 main {
   padding: 20px;
